@@ -24,6 +24,7 @@ func main() {
 	for m.Done() == false {
 		time.Sleep(time.Second)
 	}
+  fmt.Printf("Exiting mrcoordinator\n")
 
 	time.Sleep(time.Second)
 }

@@ -41,7 +41,7 @@ func TestInitialElection2A(t *testing.T) {
 	time.Sleep(2 * RaftElectionTimeout)
 	term2 := cfg.checkTerms()
 	if term1 != term2 {
-		fmt.Printf("warning: term changed even though there were no failures")
+		fmt.Printf("warning: term changed even though there were no failures\n")
 	}
 
 	// there should still be a leader.
@@ -285,6 +285,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
+  fmt.Printf("Disconnect follower %v\n", (leader + 1) % servers)
 	cfg.disconnect((leader + 1) % servers)
 
 	// the leader and remaining follower should be
@@ -296,6 +297,7 @@ func TestFailAgree2B(t *testing.T) {
 	cfg.one(105, servers-1, false)
 
 	// re-connect
+  fmt.Printf("Connect follower %v\n", (leader + 1) % servers)
 	cfg.connect((leader + 1) % servers)
 
 	// the full set of servers should preserve
@@ -472,6 +474,7 @@ func TestRejoin2B(t *testing.T) {
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
+  fmt.Printf("Disconnect leader %v\n", leader1)
 
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
@@ -484,14 +487,17 @@ func TestRejoin2B(t *testing.T) {
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
+  fmt.Printf("Disconnect leader %v\n", leader2)
 
 	// old leader connected again
 	cfg.connect(leader1)
+  fmt.Printf("Connect leader %v\n", leader1)
 
 	cfg.one(104, 2, true)
 
 	// all together now
 	cfg.connect(leader2)
+  fmt.Printf("Connect leader %v\n", leader2)
 
 	cfg.one(105, servers, true)
 

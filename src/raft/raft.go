@@ -352,7 +352,7 @@ func (rf *Raft) AppendEntries(request *RequestAppendEntriesArgs, reply *RequestA
   }
 
   if i < 0 {
-    rf.log("unmatched log request log index = %v, current rf %v = %v", request.PrevLogIndex, rf.me, rf.getLastLog().Idx) 
+    rf.log("Follower %v with last log index %v, received request PrevLogIndex %v", rf.me, lastLog.Idx, request.PrevLogIndex) 
     reply.Success = false
     return
   }

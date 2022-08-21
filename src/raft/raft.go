@@ -19,13 +19,13 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"fmt"
 	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
-  "bytes"
 
 	//	"6.824/labgob"
 	"6.824/labgob"
@@ -70,6 +70,13 @@ type LogEntry struct {
   Term int
   Idx int
   Command interface{}
+}
+
+func Max(x, y int) int {
+  if x < y {
+    return y
+  }
+  return x
 }
 
 //
@@ -156,11 +163,19 @@ func (rf *Raft) getPersistData() []byte {
   e.Encode(rf.currentTerm)
   e.Encode(rf.votedFor)
   e.Encode(rf.commitIndex)
+  e.Encode(rf.lastSnapshotIndex)
   e.Encode(rf.lastSnapshotTerm)
   e.Encode(rf.logEntries)
+  var name string
+  if rf.role == Leader {
+    name = "Leader"
+  } else {
+    name = "Follower"
+  }
+  rf.log("%v %v start persist, currentTerm = %v, votedFor = %v, commitIndex = %v, lastSnapshotIndex = %v, lastSnapshotTerm = %v, logs = %v", 
+         name, rf.me, rf.currentTerm, rf.votedFor, rf.commitIndex, rf.lastSnapshotIndex, rf.lastSnapshotTerm, rf.logEntries)
   data := w.Bytes()
   return data
-
 }
 
 //
@@ -185,8 +200,17 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+  d.Decode(&rf.currentTerm)
+  d.Decode(&rf.votedFor)
+  d.Decode(&rf.commitIndex)
+  d.Decode(&rf.lastSnapshotIndex)
+  d.Decode(&rf.lastSnapshotTerm)
+  d.Decode(&rf.logEntries)
+
+  rf.log("Client %v read persist, currentTerm = %v, votedFor = %v, commitIndex = %v, lastSnapshotIndex = %v, lastSnapshotTerm = %v, logs = %v", 
+         rf.me, rf.currentTerm, rf.votedFor, rf.commitIndex, rf.lastSnapshotIndex, rf.lastSnapshotTerm, rf.logEntries)
 	// var xxx
 	// var yyy
 	// if d.Decode(&xxx) != nil ||
@@ -507,6 +531,7 @@ func (rf *Raft) replicateOneRound(peer int) {
   if rf.role != Leader {
     return
   }
+  defer rf.persist()
 
   rf.mu.Lock()
   prevLogIndex := rf.nextIndex[peer] - 1
@@ -545,8 +570,8 @@ func (rf *Raft) handleAppendAppendEntriesRespone(peer int, request *RequestAppen
 
   if reply.Success  && len(request.Entries) > 0 {
 
-    newMatchIndex := request.Entries[len(request.Entries) - 1].Idx
-    newNextIndex := request.Entries[len(request.Entries) - 1].Idx + 1
+    newMatchIndex := request.PrevLogIndex + len(request.Entries)
+    newNextIndex := newMatchIndex + 1
 
     rf.log("Peer %v matchIndex %v --> %v", peer, rf.matchIndex[peer], newMatchIndex)
     rf.log("Peer %v nextIndex %v --> %v", peer, rf.nextIndex[peer], newNextIndex)
@@ -677,16 +702,15 @@ func (rf *Raft) applier() {
 
   for rf.killed() == false {
     rf.mu.Lock()
-    
     for rf.lastApplied >= rf.commitIndex {
       rf.applyCond.Wait()
     }
     
-    rf.log("Client %v, applier with commitIndex %v, lastApplied %v", rf.me, rf.commitIndex, rf.lastApplied)
+    rf.log("Client %v, applier with commitIndex %v, lastApplied %v, logs %v", rf.me, rf.commitIndex, rf.lastApplied, rf.logEntries)
 
     firstIndex, commitIndex, lastApplied := rf.getFirstLog().Idx, rf.commitIndex, rf.lastApplied
     entries := make([]LogEntry, commitIndex - lastApplied)
-    copy(entries, rf.logEntries[lastApplied + 1 : commitIndex + 1 - firstIndex])
+    copy(entries, rf.logEntries[lastApplied + 1 - firstIndex: commitIndex + 1 - firstIndex])
     rf.mu.Unlock()
 
     for _, entry := range entries {
@@ -697,7 +721,7 @@ func (rf *Raft) applier() {
       }
     }
     rf.mu.Lock()
-    rf.lastApplied = commitIndex
+    rf.lastApplied = Max(rf.lastApplied, commitIndex)
     rf.mu.Unlock()
   }
 }

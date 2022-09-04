@@ -195,13 +195,14 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 		return "snapshot Decode() error"
 	}
 	if index != -1 && index != lastIncludedIndex {
-		err := fmt.Sprintf("server %v snapshot doesn't match m.SnapshotIndex", i)
+		err := fmt.Sprintf("server %v index = %v, snapshot doesn't match m.SnapshotIndex %v", i, index, lastIncludedIndex)
 		return err
 	}
 	cfg.logs[i] = map[int]interface{}{}
 	for j := 0; j < len(xlog); j++ {
 		cfg.logs[i][j] = xlog[j]
 	}
+  //fmt.Printf("server %v lastApplied %v -> %v\n", i, cfg.lastApplied[i], lastIncludedIndex)
 	cfg.lastApplied[i] = lastIncludedIndex
 	return ""
 }
@@ -241,6 +242,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 			}
 
 			cfg.mu.Lock()
+      //fmt.Printf("server %v lastApplied %v -> %v\n", i, cfg.lastApplied[i], m.CommandIndex)
 			cfg.lastApplied[i] = m.CommandIndex
 			cfg.mu.Unlock()
 

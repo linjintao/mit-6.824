@@ -102,8 +102,7 @@ type Raft struct {
 	logEntries     []LogEntry
 
 	commitIndex       int
-	lastSnapshotIndex int
-  lastSnapshotTerm  int
+
   lastApplied       int
 	nextIndex         []int  //index of next log entry will be sent
 	matchIndex        []int  //index of log has been replicated, used to determine if the log can be committed when majority requirement archieve
@@ -163,8 +162,13 @@ func (rf *Raft) getPersistData() []byte {
   e.Encode(rf.currentTerm)
   e.Encode(rf.votedFor)
   e.Encode(rf.commitIndex)
-  e.Encode(rf.lastSnapshotIndex)
-  e.Encode(rf.lastSnapshotTerm)
+  e.Encode(rf.lastApplied)
+  lastIncludedIndex := rf.logEntries[0].Idx
+  e.Encode(lastIncludedIndex)
+
+  myName := "linjintao"
+  e.Encode(myName)
+
   e.Encode(rf.logEntries)
   var name string
   if rf.role == Leader {
@@ -172,8 +176,8 @@ func (rf *Raft) getPersistData() []byte {
   } else {
     name = "Follower"
   }
-  rf.log("%v %v start persist, currentTerm = %v, votedFor = %v, commitIndex = %v, lastSnapshotIndex = %v, lastSnapshotTerm = %v, logs = %v", 
-         name, rf.me, rf.currentTerm, rf.votedFor, rf.commitIndex, rf.lastSnapshotIndex, rf.lastSnapshotTerm, rf.logEntries)
+  rf.log("%v %v getPersist, currentTerm = %v, votedFor = %v, commitIndex = %v, lasstApplied = %v, logs = %v", 
+         name, rf.me, rf.currentTerm, rf.votedFor, rf.commitIndex, rf.lastApplied, rf.logEntries)
   data := w.Bytes()
   return data
 }
@@ -185,7 +189,13 @@ func (rf *Raft) getPersistData() []byte {
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
-
+  var name string
+  if rf.role == Leader {
+    name = "Leader"
+  } else {
+    name = "Follower"
+  }
+  rf.log("%v %v do persisting", name, rf.me)
   data := rf.getPersistData()
 	rf.persister.SaveRaftState(data)
 }
@@ -205,12 +215,24 @@ func (rf *Raft) readPersist(data []byte) {
   d.Decode(&rf.currentTerm)
   d.Decode(&rf.votedFor)
   d.Decode(&rf.commitIndex)
-  d.Decode(&rf.lastSnapshotIndex)
-  d.Decode(&rf.lastSnapshotTerm)
-  d.Decode(&rf.logEntries)
+  d.Decode(&rf.lastApplied)
+  var lastIncludedIndex int
+  d.Decode(&lastIncludedIndex)
+  rf.lastApplied = lastIncludedIndex
 
-  rf.log("Client %v read persist, currentTerm = %v, votedFor = %v, commitIndex = %v, lastSnapshotIndex = %v, lastSnapshotTerm = %v, logs = %v", 
-         rf.me, rf.currentTerm, rf.votedFor, rf.commitIndex, rf.lastSnapshotIndex, rf.lastSnapshotTerm, rf.logEntries)
+
+  var myName string
+  d.Decode(&myName)
+
+  d.Decode(&rf.logEntries)
+  var name string
+  if rf.role == Leader {
+    name = "Leader"
+  } else {
+    name = "Follower"
+  }
+  rf.log("%v %v read persist, currentTerm = %v, votedFor = %v, commitIndex = %v, lastApplied = %v, myName = %v, logs = %v", name,
+         rf.me, rf.currentTerm, rf.votedFor, rf.commitIndex, rf.lastApplied, myName, rf.logEntries)
 	// var xxx
 	// var yyy
 	// if d.Decode(&xxx) != nil ||
@@ -222,6 +244,97 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
+type InstallSnapshotRequest struct {
+  Term int
+  LeaderId int
+  LastIncludedIndex int
+  LastIncludedTerm int
+  Offset int
+  Data []byte
+  Done bool
+}
+
+type InstallSnapshotResponse struct {
+  Term int
+}
+
+func (rf *Raft) genInstallSnapshotRequest(peer int) *InstallSnapshotRequest {
+
+  rf.mu.Lock()
+  defer rf.mu.Unlock()
+  lastIncludedIndex, lastIncludedTerm := rf.getFirstLog().Idx, rf.getFirstLog().Term
+  rf.log("Leader %v sending snapshot to %v lastIncludedTerm %v, lastIncludedIndex %v", rf.me, peer, lastIncludedTerm, lastIncludedIndex)
+
+  return &InstallSnapshotRequest {
+    Term: rf.currentTerm,
+    LeaderId: rf.me,
+    LastIncludedIndex: lastIncludedIndex,
+    LastIncludedTerm: lastIncludedTerm,
+    Offset: 0,
+    Data: rf.persister.ReadSnapshot(),
+    Done: true,
+  }
+}
+
+func (rf *Raft) handleInstallSnapshot(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
+
+  rf.mu.Lock()
+  defer rf.mu.Unlock()
+  if rf.currentTerm < response.Term {
+    rf.currentTerm = response.Term
+    rf.ChangeRole(Follower)
+    rf.electionTimer.Reset(RandomizedElectionTimeOut())
+  } else {
+    rf.matchIndex[peer] = request.LastIncludedIndex
+    rf.nextIndex[peer] = request.LastIncludedIndex + 1
+  }
+}
+
+func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
+
+  rf.mu.Lock()
+  defer rf.mu.Unlock()
+  rf.log("Follower %v receive snapshot, lastIncludedTerm %v, lastIncludedIndex %v", rf.me, request.LastIncludedTerm, request.LastIncludedIndex)
+  rf.log("Follower %v, currentTerm %v, commitIndex %v, lastApplied %v, logs %v", rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.logEntries)
+
+  response.Term = rf.currentTerm
+
+  if request.Term < rf.currentTerm {
+    return
+  }
+
+  if request.Term > rf.currentTerm {
+    rf.currentTerm, rf.votedFor = request.Term, -1
+    rf.persist()
+  }
+
+  rf.ChangeRole(Follower)
+  rf.electionTimer.Reset(RandomizedElectionTimeOut())
+
+  if request.LastIncludedIndex <= rf.commitIndex || request.LastIncludedIndex <= rf.getFirstLog().Idx {
+    return
+  }
+
+  //rf.logEntries[0].Idx = request.LastIncludedIndex
+  //rf.logEntries[0].Term = request.LastIncludedTerm
+  //rf.persister.SaveStateAndSnapshot(rf.getPersistData(), request.Data)
+
+  //rf.lastApplied = request.LastIncludedIndex
+  //rf.commitIndex = request.LastIncludedIndex
+  go func() {
+    rf.applyCh <- ApplyMsg{
+      SnapshotValid: true,
+      Snapshot: request.Data,
+      SnapshotTerm: request.LastIncludedTerm,
+      SnapshotIndex: request.LastIncludedIndex,
+    }
+  }()
+}
+
+func shrinkEntriesArray(logEntries []LogEntry) []LogEntry {
+
+  return append([]LogEntry{}, logEntries...)
+}
 
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -230,6 +343,44 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
+
+  var name string
+  if rf.role == Leader {
+    name = "Leader"
+  } else {
+    name = "Follower"
+  }
+
+  rf.log("%v %v receive request CondInstallSnapshot lastIncludedTerm %v, lastIncludedIndex %v, log %v", name, rf.me, lastIncludedTerm, lastIncludedIndex, rf.logEntries)
+  rf.log("%v %v, before CondInstallSnapshot currentTerm %v, commitIndex %v, lastApplied %v, logs %v", name, rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.logEntries)
+
+  rf.mu.Lock()
+  defer rf.mu.Unlock()
+
+  if lastIncludedIndex <= rf.commitIndex {
+    return false
+  }
+
+  if lastIncludedIndex > rf.getLastLog().Idx {
+    rf.logEntries = make([]LogEntry, 1)
+  } else {
+    //newLogEntries := make([]LogEntry, 1)
+    //newLogEntries = append(newLogEntries, rf.logEntries[lastIncludedIndex - rf.getFirstLog().Idx:]...)
+    rf.log("%v %v key log %v", name, rf.me, rf.logEntries[lastIncludedIndex - rf.getFirstLog().Idx])
+    rf.logEntries = shrinkEntriesArray(rf.logEntries[lastIncludedIndex - rf.getFirstLog().Idx:])
+    rf.log("%v %v after shrinking logEntriesArray %v", name, rf.me, rf.logEntries)
+    rf.logEntries[0].Command = nil
+  }
+
+  rf.logEntries[0].Term = lastIncludedTerm
+  rf.logEntries[0].Idx = lastIncludedIndex
+  rf.lastApplied = Max(lastIncludedIndex, rf.lastApplied)
+  rf.commitIndex = Max(lastIncludedIndex, rf.commitIndex)
+
+  rf.log("%v %v after shrinking logEntries %v", name, rf.me, rf.logEntries)
+  rf.log("%v %v, after CondInstallSnapshot currentTerm %v, commitIndex %v, lastApplied %v, logs %v", name, rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.logEntries)
+
+  rf.persister.SaveStateAndSnapshot(rf.getPersistData(), snapshot)
 
 	return true
 }
@@ -240,7 +391,32 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+  rf.mu.Lock()
+  defer rf.mu.Unlock()
+  var name string
+  if rf.role == Leader {
+    name = "Leader"
+  } else {
+    name = "Follower"
+  }
+  rf.log("%v %v snapshoting index %v, commitIndex %v, lastApplied %v, log %v", name, rf.me, index, rf.commitIndex, rf.lastApplied, rf.logEntries)
+  snapshotIndex := rf.getFirstLog().Idx
+  if index <=snapshotIndex || index > rf.commitIndex {
+    return
+  }
 
+  //index = rf.commitIndex
+  remainLogs := rf.logEntries[index - snapshotIndex + 1:]
+  lastIncludedIndex := rf.logEntries[index - snapshotIndex].Idx
+  lastIncludedTerm:= rf.logEntries[index - snapshotIndex].Term
+
+  rf.lastApplied = index
+  rf.logEntries = make([]LogEntry, 1)
+  rf.logEntries[0].Idx = lastIncludedIndex
+  rf.logEntries[0].Term = lastIncludedTerm
+  rf.logEntries = append(rf.logEntries, remainLogs...)
+  rf.log("%v %v commitIndex %v, lastApplied %v, after snapshot shrinking log %v", name, rf.me, rf.commitIndex, rf.lastApplied, rf.logEntries)
+  rf.persister.SaveStateAndSnapshot(rf.getPersistData(), snapshot)
 }
 
 
@@ -283,7 +459,7 @@ type RequestAppendEntriesReply struct {
 
 func (rf *Raft) lastLogTermIndex() (int, int) {
   term := rf.logEntries[len(rf.logEntries) - 1].Term
-  index := rf.lastSnapshotIndex + len(rf.logEntries) - 1
+  index := rf.logEntries[len(rf.logEntries) - 1].Idx
   return term, index
 }
 
@@ -313,7 +489,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
   reply.Term = rf.currentTerm;
   reply.VoteGranted = false;
 
-  rf.log("client %v received voting request from %v, term %v", rf.me, args.CandidateId, args.Term)
+  rf.log("client %v, currentTerm %v received voting request from %v, term %v", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 
   if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId) {
     return
@@ -341,7 +517,7 @@ func (rf *Raft) AppendEntries(request *RequestAppendEntriesArgs, reply *RequestA
   defer rf.mu.Unlock()
   defer rf.persist()
 
-  rf.log("Follower %v term %v, received Leader %v, term %v, logs %v", rf.me, rf.currentTerm, request.LeaderId, request.Term, request.Entries)
+  rf.log("Follower %v term %v, received Leader %v, term %v,request logs %v\n  my logs %v", rf.me, rf.currentTerm, request.LeaderId, request.Term, request.Entries, rf.logEntries)
 
   // save a copy of currentTerm
   curTerm := rf.currentTerm
@@ -376,19 +552,31 @@ func (rf *Raft) AppendEntries(request *RequestAppendEntriesArgs, reply *RequestA
   }
 
   if i < 0 {
-    rf.log("Follower %v with last log index %v, received request PrevLogIndex %v", rf.me, lastLog.Idx, request.PrevLogIndex) 
-    reply.Success = false
-    return
-  }
+    firstLog := rf.getFirstLog()
+    rf.log("Follower %v firstLog %v, lastLog %v, received request PrevLogIndex %v", rf.me, firstLog, lastLog, request.PrevLogIndex) 
 
-  // implementation note 3 & 4
-  // delete confict and append new
-  if len(rf.logEntries) > 0 {
-    rf.logEntries = rf.logEntries[:i + 1]
-    rf.logEntries = append(rf.logEntries, request.Entries...)
+    if firstLog.Idx > request.PrevLogIndex  {
+      if len(request.Entries) > 0 && request.Entries[len(request.Entries) - 1].Idx > lastLog.Idx {
+        lenToAppended := request.Entries[len(request.Entries) - 1].Idx - lastLog.Idx
+        logsToAppended := request.Entries[len(request.Entries) - lenToAppended + 1:]
+        rf.logEntries = append(rf.logEntries, logsToAppended...)
+      }
+    } else {
+
+      reply.Success = false
+      return
+    }
+  } else {
+
+    // implementation note 3 & 4
+    // delete confict and append new
+    if len(rf.logEntries) > 0 {
+      rf.logEntries = rf.logEntries[:i + 1]
+      rf.logEntries = append(rf.logEntries, request.Entries...)
+    }
   }
   lastIdx := rf.getLastLog().Idx
-  rf.log("Follower %v logs %v", rf.me, rf.logEntries)
+  rf.log("Follower %v after AppendEntries logs %v", rf.me, rf.logEntries)
   if request.LeaderCommit > rf.commitIndex {
     if lastIdx < request.LeaderCommit {
       rf.commitIndex = lastIdx
@@ -437,6 +625,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntriesArgs, reply *RequestAppendEntriesReply) bool {
   ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+  return ok
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotRequest, reply *InstallSnapshotResponse) bool {
+  ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
   return ok
 }
 
@@ -539,11 +732,16 @@ func (rf *Raft) replicateOneRound(peer int) {
 
 
   if prevLogIndex < rf.getFirstLog().Idx {
-    rf.log("Need snapshot to catch up")
+    rf.log("Leader %v send snapshot to Follower %v, prevLogIndex %v, firstIndex %v, leader logs = %v", rf.me, peer, prevLogIndex, rf.getFirstLog().Idx, rf.logEntries)
+    snapshotRequest := rf.genInstallSnapshotRequest(peer)
+    snapshotResponse := new(InstallSnapshotResponse)
+    if rf.sendInstallSnapshot(peer, snapshotRequest, snapshotResponse) {
+      rf.handleInstallSnapshot(peer, snapshotRequest, snapshotResponse)
+    }
   } else {
 
     request := rf.genAppendEntriesRequest(prevLogIndex)
-    rf.log("Leader %v sending follower %v, log len = %v prevLogIndex = %v, LeaderCommit = %v", rf.me, peer, len(request.Entries), prevLogIndex, request.LeaderCommit)
+    rf.log("Leader %v sending follower %v, log len = %v prevLogIndex = %v, LeaderCommit = %v, leader logs = %v", rf.me, peer, len(request.Entries), prevLogIndex, request.LeaderCommit, rf.logEntries)
     reply := &RequestAppendEntriesReply{}
     if rf.sendAppendEntries(peer, request, reply) {
       rf.handleAppendAppendEntriesRespone(peer, request, reply)
@@ -581,22 +779,45 @@ func (rf *Raft) handleAppendAppendEntriesRespone(peer int, request *RequestAppen
     rf.nextIndex[peer] = newNextIndex
   }
 
-  for n := rf.getLastLog().Idx; n >= rf.commitIndex; n-- {
+  for logLen := len(rf.logEntries); logLen >= 1; logLen-- {
+    logIndex := rf.logEntries[logLen - 1].Idx
+    logTerm := rf.logEntries[logLen - 1].Term
+    if logIndex <= rf.commitIndex {
+      break
+    }
+
     count := 1
-    if rf.logEntries[n].Term == rf.currentTerm {
+    if logTerm == rf.currentTerm {
       for i := 0; i < len(rf.peers); i++ {
-        if i != rf.me && rf.matchIndex[i] >= n {
+        if i != rf.me && rf.matchIndex[i] >= logIndex {
           count += 1
         }
       }
     }
 
     if count > len(rf.peers) / 2 {
-      rf.commitIndex = n
+      rf.commitIndex = logIndex
       rf.applyCond.Signal()
       break
     }
   }
+  
+ // for n := rf.getLastLog().Idx; n >= rf.commitIndex; n-- {
+ //   count := 1
+ //   if rf.logEntries[n].Term == rf.currentTerm {
+ //     for i := 0; i < len(rf.peers); i++ {
+ //       if i != rf.me && rf.matchIndex[i] >= n {
+ //         count += 1
+ //       }
+ //     }
+ //   }
+
+ //   if count > len(rf.peers) / 2 {
+ //     rf.commitIndex = n
+ //     rf.applyCond.Signal()
+ //     break
+ //   }
+ // }
 }
 
 func (rf *Raft) replicator(peer int) {
@@ -705,14 +926,21 @@ func (rf *Raft) applier() {
     for rf.lastApplied >= rf.commitIndex {
       rf.applyCond.Wait()
     }
-    
-    rf.log("Client %v, applier with commitIndex %v, lastApplied %v, logs %v", rf.me, rf.commitIndex, rf.lastApplied, rf.logEntries)
+    var name string
+    if rf.role == Leader {
+      name = "Leader"
+    } else {
+      name = "Follower"
+    }
+    rf.log("%v %v, applier with commitIndex %v, lastApplied %v, logs %v", name, rf.me, rf.commitIndex, rf.lastApplied, rf.logEntries)
+    rf.persist()
 
     firstIndex, commitIndex, lastApplied := rf.getFirstLog().Idx, rf.commitIndex, rf.lastApplied
     entries := make([]LogEntry, commitIndex - lastApplied)
     copy(entries, rf.logEntries[lastApplied + 1 - firstIndex: commitIndex + 1 - firstIndex])
     rf.mu.Unlock()
 
+    rf.log("%v %v appling logs %v", name, rf.me, entries)
     for _, entry := range entries {
       rf.applyCh <- ApplyMsg {
         CommandValid : true,
